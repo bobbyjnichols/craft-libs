@@ -343,8 +343,9 @@ fn split(target: &Path, path: &Path) -> io::Result<(PathBuf, String)> {
 }
 
 /// Create a temporary file in `dir`, fill it with `fill`, give it the permissions of the file it
-/// replaces (`replaced`, Unix) and flush it. A leftover file with the same name is skipped. When
-/// any step fails, the temporary file is removed.
+/// replaces (`replaced`, Unix) and flush it. Permission restoration is skipped when the mode
+/// already matches after `fill`. A leftover file with the same name is skipped. When any step
+/// fails, the temporary file is removed.
 fn stage(
     fs: &dyn AtomicFs,
     dir: &Path,
@@ -674,6 +675,8 @@ mod tests {
     }
 
     impl AtomicFs for Faulty {
+        /// Create a real stage with injected failures or a simulated fixed network mode,
+        /// recording the creation policy and the Unix mode exposed by the filesystem.
         fn create_new(&self, path: &Path, permissions: NewFilePermissions) -> io::Result<File> {
             let normal = permissions == NewFilePermissions::PlatformDefault;
             self.events.borrow_mut().push(if normal { "create_new_normal" } else { "create_new" });
@@ -736,6 +739,8 @@ mod tests {
             }
             RealFs.sync_dir(dir)
         }
+        /// Record permission restoration and payload length, then inject a configured error
+        /// or delegate the mode change to the real filesystem.
         fn set_permissions(&self, file: &File, perms: std::fs::Permissions) -> io::Result<()> {
             self.events.borrow_mut().push("set_permissions");
             #[cfg(unix)]
@@ -944,6 +949,8 @@ mod tests {
         Ok(())
     }
 
+    /// Matching fixed modes permit byte and streaming replacements under both creation
+    /// policies without calling a permission operation that the mount rejects.
     #[cfg(unix)]
     #[test]
     fn unchanged_replacement_modes_need_no_chmod() -> io::Result<()> {
@@ -975,6 +982,8 @@ mod tests {
         Ok(())
     }
 
+    /// A required mode change that fails must preserve the original bytes and mode,
+    /// report the error, and remove the stage without publishing it.
     #[cfg(unix)]
     #[test]
     fn failing_to_keep_permissions_fails_the_save() -> io::Result<()> {
@@ -997,6 +1006,8 @@ mod tests {
         Ok(())
     }
 
+    /// A streaming callback that changes the stage mode must not bypass restoration
+    /// of the original mode, even when the modes matched at creation.
     #[cfg(unix)]
     #[test]
     fn replacement_checks_mode_after_streaming_callback() -> io::Result<()> {
