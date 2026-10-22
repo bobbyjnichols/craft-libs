@@ -379,7 +379,8 @@ fn stage(
                             // GVfs/SMB and document portals can expose a fixed mode but reject
                             // chmod, even when the requested mode is already in effect. Check
                             // after fill: a streaming callback may have changed the stage's mode.
-                            if file.metadata()?.permissions().mode() == p.mode() {
+                            // Compare permission and special bits, not file-type bits.
+                            if (file.metadata()?.permissions().mode() & 0o7777) == (p.mode() & 0o7777) {
                                 return Ok(());
                             }
                         }
@@ -1006,25 +1007,29 @@ mod tests {
         Ok(())
     }
 
-    /// A streaming callback that changes the stage mode must not bypass restoration
-    /// of the original mode, even when the modes matched at creation.
+    /// A streaming callback that changes permissions or setuid/setgid/sticky bits must not
+    /// bypass restoration of the original mode, even when the modes matched at creation.
     #[cfg(unix)]
     #[test]
     fn replacement_checks_mode_after_streaming_callback() -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let d = TempDir::new("callback-mode-change");
-        let p = d.0.join("doc.craft");
-        std::fs::write(&p, ORIGINAL)?;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
-        let fs = Faulty::default();
-        WriteOptions::default().atomic_write_with_custom(&fs, NO_RETRY, &p, |f| {
-            f.write_all(b"replacement")?;
-            f.set_permissions(std::fs::Permissions::from_mode(0o640))
-        })?;
-        assert_eq!(std::fs::read(&p)?, b"replacement");
-        assert_eq!(std::fs::metadata(&p)?.permissions().mode() & 0o7777, 0o600);
-        assert!(fs.events.borrow().contains(&"set_permissions"));
-        assert_no_temp(&d.0);
+        for callback_mode in [0o640, 0o1600, 0o2600, 0o4600] {
+            let p = d.0.join(format!("doc-{callback_mode:o}.craft"));
+            std::fs::write(&p, ORIGINAL)?;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+            let fs = Faulty::default();
+            WriteOptions::default().atomic_write_with_custom(&fs, NO_RETRY, &p, |f| {
+                f.write_all(b"replacement")?;
+                f.set_permissions(std::fs::Permissions::from_mode(callback_mode))?;
+                assert_eq!(f.metadata()?.permissions().mode() & 0o7777, callback_mode);
+                Ok(())
+            })?;
+            assert_eq!(std::fs::read(&p)?, b"replacement");
+            assert_eq!(std::fs::metadata(&p)?.permissions().mode() & 0o7777, 0o600);
+            assert!(fs.events.borrow().contains(&"set_permissions"));
+            assert_no_temp(&d.0);
+        }
         Ok(())
     }
 
